@@ -24,8 +24,7 @@ public class Main { // 実行の入口を持つMainクラスです
         todos.add(new Todo("牛乳を買う", false)); // 未完了のTodoを1件追加します
         todos.add(new Todo("ゴミを出す", true)); // 完了したTodoを1件追加します
         todos.add(new Todo("さんぽをする", false)); // 未完了のさんぽをするTodoを1件追加します
-
-        todos.add(new Todo("店に行く", false)); // 未完了の「店に行く」を1件追加します
+        todos.add(new Todo("店に行く", false)); // 未完了の店に行くTodoを1件追加します
 
         for (Todo todo : todos) { // ListからTodoを1件ずつ取り出して繰り返します
             System.out.println(todo.toItem()); // 変換した1行をターミナル（文字を表示する画面）に出します
