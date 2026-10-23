@@ -5,6 +5,7 @@ public class App { // Appという名前のプログラムを始めます
     public static void main(String[] args) throws Exception { // Javaが最初に実行する場所です
         HttpServer server = HttpServer.create(new InetSocketAddress(8080), 0); // 8080番で待ち受けるサーバーを用意します
         server.createContext("/", exchange -> { // / にアクセスが来たときの処理を登録します
+            System.out.println("ハンドラが動いた");
             String message = "こんにちは"; // ブラウザに返す文字を用意します
             exchange.getResponseHeaders().set("Content-Type", "text/plain; charset=UTF-8"); // 返す文字がUTF-8だと伝えます
             byte[] body = message.getBytes("UTF-8"); // 文字をUTF-8のデータにします
