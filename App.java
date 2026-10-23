@@ -8,7 +8,14 @@ public class App { // Appという名前のプログラムを始めます
             String path = exchange.getRequestURI().getPath(); // リクエストされたパスを取り出します
             String message;
             if (path.equals("/hello")) { // path が /hello か比べます
-                message = "こんにちは！";
+                String query = exchange.getRequestURI().getRawQuery(); // URLのクエリを取り出します
+                String name; // 挨拶に使う名前を入れます
+                if (query == null) { // クエリがないかを確認します
+                    name = "ゲスト"; // クエリがないときの名前です
+                } else {
+                    name = query.substring(5); // name= の後ろを切り出します
+                }
+                message = "こんにちは、" + name + "さん！"; // 名前を含めた挨拶にします
             } else if (path.equals("/byebye")) { // path が /bye か比べます
                 message = "今日の定食はカレー！";
             } else {
@@ -23,4 +30,5 @@ public class App { // Appという名前のプログラムを始めます
         server.start(); // サーバーの待ち受けを始めます
         System.out.println("サーバー起動: http://localhost:8080 （止めるときは Ctrl+C）"); // 起動したことを表示します
     } // mainの処理を終えます
+    System.out.println("query = " + query);
 } // Appプログラムを終えます
