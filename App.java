@@ -63,19 +63,46 @@ public class App { // Appという名前のプログラムを始めます
                 exchange.sendResponseHeaders(303, -1); // ★追加 / へ移動する返事を送ります
                 exchange.close(); // ★追加 返事を閉じます
                 return; // ★追加 この分岐の処理を終えます
+            } else if (path.equals("/reorder") && method.equals("POST")) { // ドラッグ後の並び順を受け取ります
+                String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8); // 並び順を読み取ります
+                String[] ids = body.substring(4).split(","); // ids= の後ろから番号を取り出します
+                List<Todo> reordered = new ArrayList<>(); // 新しい並び順を一時的に用意します
+                for (String value : ids) { // 受け取った番号を順に見ます
+                    int id = Integer.parseInt(value); // 番号を数値にします
+                    for (Todo todo : todos) { // 保存中のTodoを探します
+                        if (todo.getId() == id) { // 番号が一致したか確かめます
+                            reordered.add(todo); // Todoを新しい順番に加えます
+                            break; // 一致したTodoの検索を終えます
+                        }
+                    }
+                }
+                todos.clear(); // 元の並びを空にします
+                todos.addAll(reordered); // 新しい並び順を保存します
+                exchange.getResponseHeaders().set("Location", "/"); // / に戻します
+                exchange.sendResponseHeaders(303, -1); // / へ移動する返事を送ります
+                exchange.close(); // 返事を閉じます
+                return; // この分岐の処理を終えます
             } else if (path.equals("/")) { // ★変更 / でフォームとTodo一覧を表示します
-                String html = "<form method='post' action='/add'><input name='todo'><button>追加</button></form><ul>"; // ★変更
-                                                                                                                     // 入力フォームと一覧の開始部分を作ります
-                for (Todo todo : todos) { // ★変更 Todoを1件ずつ取り出します
-                    String mark = ""; // ★変更 未完了のTodoには印を付けません
-                    if (todo.isDone()) { // ★変更 Todoが完了しているかを確かめます
-                        mark = " ✔"; // ★変更 完了済みのTodoに印を付けます
-                    } // ★変更 完了状態の確認を終えます
-                    html += "<li>" + todo.getTitle() + mark + " <a href='/done?id=" + todo.getId()
-                            + "'>完了</a> <a href='/delete?id=" + todo.getId() + "'>削除</a></li>"; // ★追加
-                                                                                                // id付きの完了・削除リンクをHTMLに追加します
-                } // forの繰り返しを終えます
-                html += "</ul>"; // ★変更 HTMLのリストを閉じます
+                String html = "<!DOCTYPE html><html><head><style>body { max-width: 600px; margin: 24px auto; font-size: 16px; } ul { list-style: none; padding-left: 0; } .priority { display: inline-block; min-width: 2em; } li { cursor: grab; }</style></head><body><h1>わたしのTodo</h1><form method='post' action='/add'><input name='todo'><button>追加</button></form>"; // 見出し・スタイル・入力フォームを表示します
+                if (todos.isEmpty()) { // 一覧が空かどうかを確かめます
+                    html += "<p>やることは、いまゼロです</p>"; // 空のときの案内を表示します
+                } else { // Todoがあるときの一覧を作ります
+                    html += "<ul id='todo-list'>"; // ドラッグできる一覧を始めます
+                    int index = 0; // 優先順位の番号を数えます
+                    for (Todo todo : todos) { // ★変更 Todoを1件ずつ取り出します
+                        String priority = "優先度" + (index < 20 ? String.valueOf((char) (0x2460 + index)) : String.valueOf(index + 1)); // 優先度①から順に表示します
+                        String mark = ""; // ★変更 未完了のTodoには印を付けません
+                        if (todo.isDone()) { // ★変更 Todoが完了しているかを確かめます
+                            mark = " ✔"; // ★変更 完了済みのTodoに印を付けます
+                        } // ★変更 完了状態の確認を終えます
+                        html += "<li draggable='true' data-id='" + todo.getId() + "' ondragstart='dragTodo(event)' ondragover='event.preventDefault()' ondrop='dropTodo(event)'><span class='priority'>" + priority + "</span>" + todo.getTitle() + mark + " <a href='/done?id=" + todo.getId()
+                                + "'>完了</a> <a href='/delete?id=" + todo.getId() + "'>削除</a></li>"; // 優先順位・Todo・操作リンクを表示します
+                        index++; // 次の優先順位に進みます
+                    } // forの繰り返しを終えます
+                    html += "</ul>"; // ★変更 HTMLのリストを閉じます
+                    html += "<script>function dragTodo(event){event.dataTransfer.setData('text/plain',event.currentTarget.dataset.id);} function dropTodo(event){event.preventDefault();const target=event.currentTarget;const id=event.dataTransfer.getData('text/plain');const items=Array.from(document.querySelectorAll('#todo-list li'));const dragged=items.find(item=>item.dataset.id===id);if(!dragged||dragged===target)return;const rect=target.getBoundingClientRect();target.parentNode.insertBefore(dragged,event.clientY>rect.top+rect.height/2?target.nextSibling:target);const ordered=Array.from(document.querySelectorAll('#todo-list li'));ordered.forEach((item,index)=>{item.querySelector('.priority').textContent='優先度'+(index<20?String.fromCharCode(0x2460+index):String(index+1));});fetch('/reorder',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'ids='+ordered.map(item=>item.dataset.id).join(',')});}</script>"; // マウスで並べ替え、優先度とサーバー側の順番を更新します
+                } // 空かどうかによる表示を終えます
+                html += "</body></html>"; // HTMLページを閉じます
                 message = html; // ★変更 組み立てたHTMLを返す中身にします
                 exchange.getResponseHeaders().set("Content-Type", "text/html; charset=UTF-8"); // ★変更
                                                                                                // この返事をUTF-8のHTMLにします
