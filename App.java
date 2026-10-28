@@ -4,46 +4,18 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
-import java.sql.Connection; // ★ SQLite JDBCでDB接続を扱います
-import java.sql.DriverManager; // ★ SQLite JDBCでDB接続を開きます
-import java.sql.PreparedStatement; // ★ SQLの追加・更新・削除に使います
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
 public class App {
-    private static Connection connection; // ★ CSVとメモリ上の一覧に代えてSQLite接続を使います
+    private static final List<Todo> todos = new ArrayList<>();
+    private static int nextId = 1;
 
-    public static void main(String[] args) throws Exception {
-        connection = DriverManager.getConnection("jdbc:sqlite:todos.db"); // ★ 要件のSQLiteファイルに接続します
-        try (Statement statement = connection.createStatement()) {
-            statement.executeUpdate("CREATE TABLE IF NOT EXISTS todos (id INTEGER PRIMARY KEY, title TEXT, done INTEGER)"); // ★ 起動時にテーブルを用意します
-        }
-
+    public static void main(String[] args) throws IOException {
         HttpServer server = HttpServer.create(new InetSocketAddress(8080), 0);
         server.createContext("/", App::handle);
-        server.createContext("/api/todos", exchange -> { // Todo一覧JSON APIの入口を追加します
-            if (!exchange.getRequestMethod().equals("GET")) { // GET以外のリクエストを判定します
-                exchange.getResponseHeaders().set("Allow", "GET"); // 許可するHTTPメソッドを返します
-                send(exchange, 405, "text/plain; charset=UTF-8", "Method Not Allowed"); // GET以外を拒否します
-                return; // API処理を終了します
-            } // HTTPメソッドの判定を終えます
-            try { // DB読み出し時の例外を処理します
-                String json = renderTodosJson(); // DBのTodo一覧をJSON文字列にします
-                byte[] body = json.getBytes(StandardCharsets.UTF_8); // JSONをUTF-8のバイト列にします
-                exchange.getResponseHeaders().set("Content-Type", "application/json"); // charsetなしでJSON形式を指定します
-                exchange.sendResponseHeaders(200, body.length); // 成功ステータスと本文の長さを返します
-                exchange.getResponseBody().write(body); // JSON本文をレスポンスへ書き込みます
-                exchange.close(); // レスポンスを閉じます
-            } catch (SQLException e) { // DB読み出しエラーを受け取ります
-                e.printStackTrace(); // エラー詳細をサーバー側に表示します
-                send(exchange, 500, "application/json", "{\"error\":\"database error\"}"); // JSON形式のエラーを返します
-            } // DB例外処理を終えます
-        }); // Todo一覧JSON APIの入口を登録します
         server.start();
         System.out.println("サーバー起動: http://localhost:8080 (終了するには Ctrl+C)");
     }
@@ -52,130 +24,102 @@ public class App {
         String path = exchange.getRequestURI().getPath();
         String method = exchange.getRequestMethod();
 
-        try {
-            if (path.equals("/add") && method.equals("POST")) {
-                String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
-                String title = parseForm(body).getOrDefault("todo", "").trim();
-                if (!title.isEmpty()) {
-                    try (PreparedStatement statement = connection.prepareStatement( // ★ CSV書き込みをINSERTに置き換え
-                            "INSERT INTO todos (title, done) VALUES (?, 0)")) {
-                        statement.setString(1, title);
-                        statement.executeUpdate();
+        if (path.equals("/add") && method.equals("POST")) {
+            String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            String title = parseForm(body).getOrDefault("todo", "").trim();
+            if (!title.isEmpty()) {
+                synchronized (todos) {
+                    todos.add(new Todo(nextId++, title));
+                }
+            }
+            redirect(exchange);
+            return;
+        }
+
+        if (path.equals("/done") && method.equals("GET")) {
+            int id = queryId(exchange);
+            synchronized (todos) {
+                for (Todo todo : todos) {
+                    if (todo.id == id) {
+                        todo.done = true;
+                        break;
                     }
                 }
-                redirect(exchange);
-                return;
             }
+            redirect(exchange);
+            return;
+        }
 
-            if (path.equals("/done") && method.equals("GET")) {
-                int id = queryId(exchange);
-                if (id > 0) {
-                    try (PreparedStatement statement = connection.prepareStatement( // ★ 完了状態をUPDATEで保存
-                            "UPDATE todos SET done = 1 WHERE id = ?")) {
-                        statement.setInt(1, id);
-                        statement.executeUpdate();
-                    }
-                }
-                redirect(exchange);
-                return;
+        if (path.equals("/delete") && method.equals("GET")) {
+            int id = queryId(exchange);
+            synchronized (todos) {
+                todos.removeIf(todo -> todo.id == id);
             }
+            redirect(exchange);
+            return;
+        }
 
-            if (path.equals("/delete") && method.equals("GET")) {
-                int id = queryId(exchange);
-                if (id > 0) {
-                    try (PreparedStatement statement = connection.prepareStatement( // ★ CSV書き換えをDELETEに置き換え
-                            "DELETE FROM todos WHERE id = ?")) {
-                        statement.setInt(1, id);
-                        statement.executeUpdate();
-                    }
-                }
-                redirect(exchange);
-                return;
-            }
-
-            if (path.equals("/")) {
-                sendHtml(exchange, renderTodos()); // ★ メモリ上の一覧ではなくSELECT結果を表示
-            } else {
-                send(exchange, 404, "text/plain; charset=UTF-8", "ページが見つかりません");
-            }
-        } catch (SQLException e) {
-            e.printStackTrace();
-            send(exchange, 500, "text/plain; charset=UTF-8", "データベースエラーが発生しました");
+        if (path.equals("/") && method.equals("GET")) {
+            sendHtml(exchange, renderTodos());
+        } else {
+            send(exchange, 404, "text/plain; charset=UTF-8", "ページが見つかりません");
         }
     }
 
-    private static String renderTodos() throws SQLException {
-        List<Todo> todos = new ArrayList<>();
-        try (Statement statement = connection.createStatement();
-             ResultSet results = statement.executeQuery( // ★ 一覧をSELECTで読み出します
-                     "SELECT id, title, done FROM todos ORDER BY id")) {
-            while (results.next()) {
-                todos.add(new Todo(results.getInt("id"), results.getString("title"),
-                        results.getInt("done") != 0));
-            }
+    private static String renderTodos() {
+        List<Todo> snapshot;
+        synchronized (todos) {
+            snapshot = new ArrayList<>(todos);
         }
 
-        StringBuilder html = new StringBuilder("<!DOCTYPE html><html><head><meta charset='UTF-8'>"
-                + "<style>body{max-width:600px;margin:24px auto;font:16px sans-serif}"
-                + "li{margin:12px 0}.done{text-decoration:line-through;color:#777}</style></head><body>");
-        html.append("<h1>わたしのTodo</h1>")
-                .append("<form method='post' action='/add'><input name='todo' required>")
-                .append("<button>追加</button></form>");
-        if (todos.isEmpty()) {
-            html.append("<p>やることは、いまゼロです</p>");
+        int remaining = 0;
+        for (Todo todo : snapshot) {
+            if (!todo.done)
+                remaining++;
+        }
+
+        StringBuilder html = new StringBuilder("<!DOCTYPE html><html lang='ja'><head><meta charset='UTF-8'>"
+                + "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+                + "<title>わたしのTodo</title><style>"
+                + ":root{color-scheme:light;--ink:#3e342b;--muted:#827568;--paper:#fffdf8;--line:#eadfce;--rust:#bd633d;--moss:#68744f}"
+                + "*{box-sizing:border-box}body{min-height:100vh;margin:0;padding:56px 20px;background:radial-gradient(ellipse at 15% 8%,#f4dfc8 0,transparent 34%),radial-gradient(ellipse at 90% 90%,#e4e6d4 0,transparent 35%),#f7f1e7;color:var(--ink);font:16px/1.6 'Yu Gothic',Meiryo,sans-serif}"
+                + ".wrap{max-width:620px;margin:0 auto}.hero{position:relative;min-height:188px;display:flex;align-items:center;overflow:hidden}.hero-copy{position:relative;z-index:1}.scene{position:absolute;right:0;bottom:0;width:min(55%,300px);height:188px;opacity:.8;pointer-events:none}.eyebrow{margin:0 0 10px;color:var(--rust);font-size:12px;font-weight:700;letter-spacing:.2em;text-transform:uppercase}"
+                + "h1{margin:0;font-family:Georgia,'Yu Mincho',serif;font-size:clamp(34px,7vw,48px);font-weight:500;letter-spacing:.04em}.intro{margin:10px 0 28px;color:var(--muted)}"
+                + ".card{padding:28px;background:var(--paper);border:1px solid rgba(183,148,111,.25);border-radius:18px;box-shadow:0 18px 45px rgba(83,60,38,.09)}"
+                + "form{display:flex;gap:10px;margin-bottom:24px}input{min-width:0;flex:1;padding:13px 15px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--ink);font:inherit;outline:none}input:focus{border-color:var(--rust);box-shadow:0 0 0 3px rgba(189,99,61,.13)}"
+                + "button{padding:12px 19px;border:0;border-radius:10px;background:var(--rust);color:white;font:inherit;font-weight:700;cursor:pointer;transition:background .2s,transform .2s}button:hover{background:#a64f30;transform:translateY(-1px)}"
+                + ".list-head{display:flex;align-items:center;justify-content:space-between;padding-bottom:12px;border-bottom:1px solid var(--line);color:var(--muted);font-size:13px}.count{color:var(--moss);font-weight:700}ul{margin:0;padding:0;list-style:none}li{display:flex;align-items:center;gap:12px;padding:15px 2px;border-bottom:1px solid #f0e9df}li:last-child{border-bottom:0}"
+                + ".mark{display:grid;width:22px;height:22px;flex:none;place-items:center;border:1.5px solid #cbbba7;border-radius:50%;color:white;font-size:13px}.done .mark{border-color:var(--moss);background:var(--moss)}.title{flex:1;overflow-wrap:anywhere}.done .title{color:#a39a8d;text-decoration:line-through}"
+                + "a{color:var(--moss);font-size:13px;text-decoration:none}a:hover{text-decoration:underline}.delete{color:#a26956}.empty{padding:30px 8px;text-align:center;color:var(--muted)}.empty-mark{display:block;margin-bottom:8px;color:var(--rust);font-size:28px}"
+                + "footer{margin-top:18px;color:#988a7a;text-align:center;font-size:12px}@media(max-width:480px){body{padding:32px 14px}.card{padding:20px}form{gap:8px}button{padding:11px 14px}}"
+                + "</style></head><body><main class='wrap'><header class='hero'><div class='hero-copy'><p class='eyebrow'>A little autumn, a little progress</p>"
+                + "<h1>わたしの Todo</h1><p class='intro'>秋の空気と一緒に、今日やることをひとつずつ。</p></div>"
+                + "<svg class='scene' viewBox='0 0 300 188' role='img' aria-label='秋色に染まる木立と落ち葉' xmlns='http://www.w3.org/2000/svg'>"
+                + "<path d='M0 174 Q65 162 124 172 T300 166 V188 H0Z' fill='#d9d6bd' opacity='.65'/><path d='M214 166 Q222 122 218 69 M251 170 Q246 131 258 92 M174 170 Q181 137 169 111' fill='none' stroke='#806148' stroke-width='7' stroke-linecap='round'/>"
+                + "<path d='M218 119l-25-22m27 8 22-25m-6 83 24-25m-85 7-20-19' fill='none' stroke='#806148' stroke-width='4' stroke-linecap='round'/>"
+                + "<g opacity='.94'><circle cx='191' cy='81' r='27' fill='#bd7049'/><circle cx='222' cy='65' r='32' fill='#c9874c'/><circle cx='253' cy='77' r='26' fill='#a96842'/><circle cx='198' cy='110' r='25' fill='#b57d4f'/><circle cx='238' cy='103' r='29' fill='#9a7750'/><circle cx='265' cy='112' r='20' fill='#c18a4e'/><circle cx='164' cy='105' r='20' fill='#b27a49'/></g>"
+                + "<path d='M54 174q4-30 0-61m0 25-13-13m14 3 13-14' fill='none' stroke='#8a6a4d' stroke-width='4' stroke-linecap='round'/><g fill='#a58a5c'><ellipse cx='37' cy='119' rx='15' ry='9' transform='rotate(28 37 119)'/><ellipse cx='69' cy='112' rx='15' ry='9' transform='rotate(-34 69 112)'/><ellipse cx='50' cy='99' rx='16' ry='10' transform='rotate(15 50 99)'/></g>"
+                + "<path d='M95 164q8-10 18-2m-4-17q8-8 15-2m36 32q7-11 16-4' fill='none' stroke='#b6784e' stroke-width='3' stroke-linecap='round'/></svg></header><section class='card'>"
+                + "<form method='post' action='/add'><input name='todo' placeholder='今日やることを追加…' aria-label='Todo' required><button type='submit'>＋ 追加</button></form>"
+                + "<div class='list-head'><span>今日のリスト</span><span class='count'>あと " + remaining + " 件</span></div>");
+        if (snapshot.isEmpty()) {
+            html.append("<div class='empty'><span class='empty-mark'>✦</span>まずは、やることをひとつ書いてみましょう。</div>");
         } else {
             html.append("<ul>");
-            for (Todo todo : todos) {
-                html.append("<li><span class='").append(todo.done ? "done" : "").append("'>")
-                        .append(escapeHtml(todo.title)).append(todo.done ? " ✓" : "")
-                        .append("</span> ");
+            for (Todo todo : snapshot) {
+                html.append("<li class='").append(todo.done ? "done" : "")
+                        .append("'><span class='mark'>").append(todo.done ? "✓" : "")
+                        .append("</span><span class='title'>").append(escapeHtml(todo.title)).append("</span>");
                 if (!todo.done) {
-                    html.append("<a href='/done?id=").append(todo.id).append("'>完了</a> ");
+                    html.append("<a href='/done?id=").append(todo.id).append("'>完了</a>");
                 }
-                html.append("<a href='/delete?id=").append(todo.id).append("'>削除</a></li>");
+                html.append("<a class='delete' href='/delete?id=").append(todo.id).append("'>削除</a></li>");
             }
             html.append("</ul>");
         }
-        return html.append("</body></html>").toString();
+        html.append("</section><footer>ゆっくりでも、ひとつずつ。</footer></main></body></html>");
+        return html.toString();
     }
-
-    private static String renderTodosJson() throws SQLException { // Todo一覧を指定形式のJSONに変換します
-        StringBuilder json = new StringBuilder("["); // JSON配列の開始を用意します
-        try (Statement statement = connection.createStatement(); // Todo一覧取得用のSQL文を作ります
-             ResultSet results = statement.executeQuery("SELECT title, done FROM todos ORDER BY id")) { // 全Todoを読み出します
-            boolean first = true; // 最初の要素かどうかを記録します
-            while (results.next()) { // 読み出したTodoを順に処理します
-                if (!first) json.append(","); // 2件目以降の要素の前にカンマを付けます
-                json.append("{\"title\":\"").append(escapeJson(results.getString("title"))) // タイトルをJSON用にエスケープして追加します
-                        .append("\",\"done\":") // doneプロパティを追加します
-                        .append(results.getInt("done") != 0) // done値をJSONの真偽値で追加します
-                        .append("}"); // Todoオブジェクトを閉じます
-                first = false; // 次のTodoが2件目以降であることを記録します
-            } // 全Todoの処理を終えます
-        } // SQLリソースを閉じます
-        return json.append("]").toString(); // JSON配列を閉じて返します
-    } // Todo一覧JSONの生成を終えます
-
-    private static String escapeJson(String value) { // JSON文字列内の特殊文字をエスケープします
-        if (value == null) return ""; // nullのタイトルを空文字列として扱います
-        StringBuilder escaped = new StringBuilder(); // エスケープ済み文字列を組み立てます
-        for (int i = 0; i < value.length(); i++) { // タイトルの文字を1文字ずつ確認します
-            char ch = value.charAt(i); // 現在の文字を取り出します
-            switch (ch) { // JSONで特別な意味を持つ文字を判定します
-                case '"': escaped.append("\\\""); break; // 引用符をバックスラッシュ付きにします
-                case '\\': escaped.append("\\\\"); break; // バックスラッシュを二重にします
-                case '\b': escaped.append("\\b"); break; // バックスペースをJSON表記にします
-                case '\f': escaped.append("\\f"); break; // フォームフィードをJSON表記にします
-                case '\n': escaped.append("\\n"); break; // 改行をJSON表記にします
-                case '\r': escaped.append("\\r"); break; // 復帰文字をJSON表記にします
-                case '\t': escaped.append("\\t"); break; // タブをJSON表記にします
-                default: // その他の文字を判定します
-                    if (ch < 0x20) escaped.append(String.format("\\u%04x", (int) ch)); // 制御文字をUnicode表記にします
-                    else escaped.append(ch); // 通常の文字はそのまま追加します
-            } // 文字ごとのエスケープ処理を終えます
-        } // タイトル全体の走査を終えます
-        return escaped.toString(); // JSON用にエスケープした文字列を返します
-    } // JSON文字列エスケープを終えます
 
     private static Map<String, String> parseForm(String body) {
         return java.util.Arrays.stream(body.split("&"))
@@ -189,7 +133,8 @@ public class App {
 
     private static int queryId(HttpExchange exchange) {
         String query = exchange.getRequestURI().getRawQuery();
-        if (query == null) return -1;
+        if (query == null)
+            return -1;
         for (String part : query.split("&")) {
             String[] pair = part.split("=", 2);
             if (pair.length == 2 && pair[0].equals("id")) {
@@ -230,12 +175,11 @@ public class App {
     private static class Todo {
         final int id;
         final String title;
-        final boolean done;
+        boolean done;
 
-        Todo(int id, String title, boolean done) {
+        Todo(int id, String title) {
             this.id = id;
             this.title = title;
-            this.done = done;
         }
     }
 }
